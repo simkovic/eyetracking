@@ -16,10 +16,10 @@ except ImportError:
 
 from psychopy.sound import SoundPygame
 from psychopy.core import Clock
+from psychopy.misc import deg2pix
 from psychopy import visual, event
 import numpy as np
-import sys
-
+import sys,os
 def myCm2deg(cm,dist): return cm/(dist*0.017455) 
 
 # here are some constants, settings and helper functions
@@ -28,10 +28,10 @@ class ETSTATUS():
     toString = ('Not Found', 'Found', 'Connected', 'Finished Setup','Started Calibration',
         'Calibration Failed','Calibration was Successful', 'Received Calibration Data', 
         'Calibration Accepted', 'Tracking Finished')
-
 class Settings():
     """ I put here everything I considered worth varying"""
-    stimPath='stimuli/' #stimulus path
+    
+    stimPath=os.path.abspath(__file__).rsplit(os.path.sep,1)[0]+os.path.sep+'stimuli'+os.path.sep #stimulus path
     calStimPath = stimPath+'spiral.png' # path of the calibration picture
     dcorrStimPath=stimPath+'clover.png' # path of the drift correction picture (= attention catcher)
     soundStimPath=stimPath+'6.ogg' # path of the sound stimulus
@@ -956,8 +956,9 @@ class TobiiControllerFromOutput(TobiiController):
 if __name__ == "__main__":
     # following demo shows the performance of the online fixation detection algorithm
     import sys
-    win = visual.Window(size=(1280,1024),pos=(1280,0),fullscr=True,units='deg',monitor='hyundai')
-    controller = TobiiController(win)
+    f=0
+    win = visual.Window(size=(1280,1024),pos=(0,0),fullscr=True,units='deg',monitor='tobii',screen=1)
+    controller = TobiiController(win,lambda: f)
     controller.doMain()
     controller.preTrial()
     # fixation point marker
@@ -966,19 +967,20 @@ if __name__ == "__main__":
     waitkey = True
     fixdur =0
     while waitkey:
-        gd,cgp,f = controller.getCurrentFixation(units='pix')
-        if f: fixdur+=1
+        gd,cgp,isf,more = controller.getCurrentFixation(units='pix')
+        if isf: fixdur+=1
         else: fixdur=1
         if not np.isnan(cgp[0]): 
             marker.setPos(cgp)
-            marker.setRadius(fixdur/10.0)
+            marker.setRadius(fixdur/5.0)
         for key in event.getKeys():
             if key=='space':
-                waitkey = False
+                waitkey=False
             elif key=='w':
                 controller.sendMessage('w key')
         marker.draw()
         win.flip()
+        f+=1
     
     controller.postTrial()
     win.close()
