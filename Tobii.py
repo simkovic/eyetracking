@@ -13,7 +13,8 @@ try:
     from tobii.eye_tracking_io.basic import EyetrackerException
 except ImportError:
     print 'Warning: Tobii import Failed'
-
+        
+from threading import Thread
 from psychopy.sound import SoundPygame
 from psychopy.core import Clock
 from psychopy.misc import deg2pix
@@ -63,23 +64,21 @@ class Settings():
     def ucsxy2norm(xy):
         return xy*Settings.scaling
     
-def readTobiiOutput(sid,block):
-    ''' not implemented '''
-    pass
-
 class TobiiController: 
     
-    def __init__(self, win,getfhandle,sid=0,block=0,verbose=False):
+    def __init__(self, win,getfhandle,sid=0,block=0,verbose=False,fin=None,fout=''):
         """ Initialize controller window, connect and activate eyetracker
             win - supply a window where the experiment is shown
             sid - subject id
             block - block nr, for experiments with several blocks
+            fn - file name TC from data
         """
         self.etstatus=ETSTATUS.OFF
         self.sid=sid
         self.block=block
         self.getf=getfhandle
         self.verbose=verbose
+        self.fin=fin
         self.target=None
         self.eyetracker = None
         self.eyetrackers = {}
@@ -103,6 +102,13 @@ class TobiiController:
         # drift correction vars
         self.dcorrstim=visual.ImageStim(self.win,
             image=Settings.dcorrStimPath,size=(200,200),units='pix')
+        self.init_eyetracker()
+        self.gazeData = []
+        self.curTime=[]
+        self.eventData = []
+        self.setDataFile(fout+'VP%03dB%d.csv'%(self.sid,self.block))
+
+    def init_eyetracker(self):
         # lets start, initialize, find and activate the eyetracker
         tobii.eye_tracking_io.init()
         self.clock = tobii.eye_tracking_io.time.clock.Clock()
@@ -112,14 +118,9 @@ class TobiiController:
             self.on_eyetracker_browser_event)
         while not self.etstatus==ETSTATUS.FOUND:
             time.sleep(0.01)
-        self.gazeData = []
-        self.curTime=[]
-        self.eventData = []
         self.activate(self.eyetrackers.keys()[0]) # by default we take the first eyetracker found
         self.hz=self.eyetracker.GetFramerate()
-        self.setDataFile('VP%03dB%d.csv'%(self.sid,self.block))
         
-
     def on_eyetracker_browser_event(self, event_type, event_name, eyetracker_info):
         # When a new eyetracker is found we add it to the treeview and to the 
         # internal list of eyetracker_info objects
@@ -608,13 +609,13 @@ class TobiiController:
         self.fixloc=np.array((np.nan,np.nan))
         self.fixsum=np.array((np.nan,np.nan))
         self.fixdur=0
-        self.eyetracker.events.OnGazeDataReceived += self.onGazedata
-        self.eyetracker.StartTracking()
+        #self.eyetracker.events.OnGazeDataReceived += self.onGazedata
+        self.eyetracker.StartTracking(self.onGazedata)
     
     def stopTracking(self,flush=True):
         ''' flush - True: write the data to output file, False: discard data '''
         self.eyetracker.StopTracking()
-        self.eyetracker.events.OnGazeDataReceived -= self.onGazedata
+        #self.eyetracker.events.OnGazeDataReceived -= self.onGazedata
         if flush: self.flushData()
         self.curTime=[]
         self.gazeData = []
@@ -767,7 +768,6 @@ class TobiiController:
             et=(e[0]-timeStampStart)/1000.0
             self.datafile.write('%.3f\t%d\t%s\n' % (et,e[1],e[2]))
             eind+=1
-            
         self.datafile.flush()
     ############################################################################
     # high-level methods for eyetracker control
@@ -786,173 +786,143 @@ class TobiiController:
     def closeConnection(self):
         self.closeDataFile()
         self.destroy()
+
+############################################################################
+
+# Dummy eyetracker & Tobii controller that loads data from a file
+############################################################################
+
     
+class DummyVector():
+    def __init__(self,x,y):
+        self.x=x;self.y=y
+class DummyPoint2D():
+    def __init__(self,ts,lx,ly,lv,rx,ry,rv,lp,rp):
+        self.Timestamp=ts*1000000
+        self.LeftGazePoint2D=DummyVector(lx,ly)
+        self.RightGazePoint2D=DummyVector(rx,ry)
+        self.LeftValidity=lv;self.RightValidity=rv
+        self.LeftPupil=lp;self.RightPupil=rp
+def loadData(fin):
+    ''' fin - filepath '''
+    #print fin
+    f=open(fin,'r')
+    data=[];start=False
+    for line in f.readlines():
+        cols=line.rsplit('\t')
+        if cols[0]=='Recording refresh rate: ':
+            hz=float(cols[1])
+        if cols[0]=='Recording resolution':
+            w,h=cols[1].rsplit(' x ')
+            w=float(w);h=float(h)
+            print 'res',w,h
+        if line[:15]=='Recording time:' and start:
+            start=False
+        if len(cols)>2 and cols[2]=='Trial':
+            if len(data):
+                data[-1]=np.array(data[-1])
+                data[-1][:,0]-=data[-1][0,0];data[-1][:,0]/=1000.
+                for i in [2,3,5,6]:
+                    sel=data[-1][:,i]==-1
+                    data[-1][sel,i]=np.nan
+                data[-1][:,[2,5]]/=w;data[-1][:,[3,6]]/=h
+            #t0=float(cols[0])
+            data.append([]);start=True
+        if start and len(cols)==11: data[-1].append(map(float,cols))
+    f.close()
+    data[-1]=np.array(data[-1])
+    data[-1][:,0]-=data[-1][0,0];data[-1][:,0]/=1000.
+    for i in [2,3,5,6]:
+        sel=data[-1][:,i]==-1
+        data[-1][sel,i]=np.nan
+    data[-1][:,[2,5]]/=w;data[-1][:,[3,6]]/=h
+    return data,hz
+class DummyClock():
+    def __init__(self):
+        self.t0=time.time()
+
+
+class DummyEyetracker(Thread):
+    def start(self,fin):
+        self.trial=0;self.index=0
+        self.makedata=0;self.destroyFlag=False
+        self.data,self.hz=loadData(fin)
+        self.events=DummyVector(0,0)# any object will do
+        self.events.OnGazeDataReceived=[]
+        self.tracking=False
+        Thread.start(self)
+        return self.hz
+    def convert_from_remote_to_local(self,time): return time
+    def convert_from_local_to_remote(self,time): return time
+    def get_time(self): return (time.time()-self.t0)*1000000
+        
+    def run(self):
+        inc=1/float(self.hz)
+        while self.trial<len(self.data):
+            if self.destroyFlag: break
+            #print 'loopstart'
+            if not self.tracking:
+                #print 'not tracking'
+                time.sleep(0.01)
+                continue
+            if self.index>=self.data[self.trial].shape[0]:
+                self.makedata+=1
+                tt=self.data[self.trial][-1,0]+inc*self.makedata
+                p=DummyPoint2D(tt,np.nan,np.nan,4,np.nan,np.nan,4,0,np.nan)
+                self.ongazeData(None,p)
+                time.sleep(inc)
+                #print 'no more data'
+                continue
+            if self.data[self.trial][self.index,0]<0:
+                raise ValueError
+            diff=(time.time()-self.t0)-self.data[self.trial][self.index,0]
+            if diff>0:
+                #print 'difsleep',self.trial,self.index,self.data[self.trial][self.index,2]
+                p=DummyPoint2D(*self.data[self.trial][self.index,[0,2,3,4,5,6,7,9,10]].tolist())
+                self.ongazeData(None,p)
+                self.index+=1
+            else:
+                time.sleep(-diff+0.0001)
+                #print -diff,self.trial,time.time()-self.t0,self.index,self.data[self.trial][self.index,0]
+        print 'finished'
+    def StartTracking(self,callback):
+        print 'start tracking',self.trial
+        self.ongazeData=callback
+        self.tracking=True
+        self.t0=time.time()
+    def StopTracking(self):
+        if self.trial<len(self.data):
+            
+            dr=self.data[self.trial][self.index:,2]
+            print 'stop tracking', dr.shape[0],(~np.isnan(dr)).sum()
+            if (~np.isnan(dr)).sum()>10:
+                self.data[self.trial]=self.data[self.trial][self.index:,:]
+                self.data[self.trial][:,0]-=self.data[self.trial][0,0]
+            else: self.trial+=1 
+        else:
+            print 'stop tracking'
+            self.trial+=1;
+        self.tracking=False;self.makedata=0;self.index=0;
+    def destroy(self):
+        self.destroyFlag=True
+        
 class TobiiControllerFromOutput(TobiiController):
-    ''' this won't work since the readTobii functionality is missing
-
-        Simulates eyetracking data based on
-        the output from previous experiment
-        Useful for debuging gaze contingent experiments
-    '''
-    def __init__(self,win,sid,block, playMode=True,initTrial=0):
-        self.playMode=playMode
-        self.data=readTobiiOutput(sid,block)
-        self.hz=60.0
-        self.winhz=75
-        self.win=win
-        self.circle=visual.Circle(self.win,radius=0.2,fillColor='red',lineColor='red',units='deg' )
-        self.circle2=visual.Circle(self.win,radius=0.2,fillColor='blue',lineColor='blue',units='deg' )
-        self.msg1=visual.TextStim(self.win,pos=(2,14),wrapWidth=20)
-        self.msg2=visual.TextStim(self.win,pos=(-5,12),text='No message')
-        self.trial=initTrial-1
-    def doMain(self): pass
-    def sendMessage(self,event):
-        print 'Trial %d Experiment Message %s' %(self.trial,event)
+    def init_eyetracker(self):
+        self.eyetracker=DummyEyetracker()
+        self.hz=self.eyetracker.start(self.fin)
+        self.clock=self.eyetracker
+        self.syncmanager=self.eyetracker
+        #self.etstatus=ETSTATUS.CREATED
+    def destroy(self):
+        self.eyetracker.destroy()
+        self.eyetracker = None
+    def doDriftCorrection(self):
+        Settings.psychopyClock.reset()
+        self.sendMessage('Drift Correction')
     def preTrial(self,driftCorrection=True):
-        self.circle.setFillColor('red')
-        self.trial+=1
-        self.i= -1
-        self.T=int(120*self.winhz)
-        self.gaze=np.ones((self.T,2))*np.nan
-        self.times=np.ones(self.T)*np.nan
-        self.check=np.ones(self.T)*np.nan
-        msgi=0
-        self.msgs=['']
-        # we start at the second frame to make the messages and frames consecutive
-        for f in range(self.T):
-            
-            index=(np.int32(self.data[self.trial].gaze[:,-1])<=f).nonzero()[0]
-            
-            if len(index)==0: index=0
-            else: index= max(index)
-            
-            if f-self.data[self.trial].gaze[index,-1]>4: index=0
-            #print index,self.data[self.trial].gaze[index,-1],f
-            #if f>20: bla
-            gp=self.getGazePosition(index)
-            
-            self.gaze[f,:]=gp
-            self.times[f] = self.data[self.trial].gaze[index,0]
-            #self.check[f]=self.data[self.trial].gaze[index,-1]
-            
-            if len(self.data[self.trial].msg) > msgi:
-                if self.data[self.trial].msg[msgi][2]=='Reward On': msgi+=1
-                if f==self.data[self.trial].msg[msgi][1]:
-                    self.msgs.append(self.data[self.trial].msg[msgi][2])
-                    msgi+=1
-                else: self.msgs.append('')
-            else: self.msgs.append('')
-        self.msgs.append('')
-        self.times/=1000.0
-        # pre-compute fixations
-        self.fixloc=np.array((np.nan,np.nan))
-        self.fixsum=np.array((np.nan,np.nan))
-        self.fixdur=0
-        self.fixBlinkCount=0
-        self.fixations=np.ones((self.T,3))
-        self.gazeData=[]
-        for i in range(self.T):
-            cgp = self.gaze[i,:]
-            if i>0 and self.times[i]!=self.times[i-1]:self.computeFixation(cgp)
-            self.fixations[i,2]=self.fixdur/self.hz
-            self.fixations[i,[0,1]]=self.fixsum/5.0#float(max(self.fixdur,1))
-            
-        self.t0=Settings.psychopyClock.getTime()    
-    def postTrial(self):
-        #print 'TCFO.postTrial >> Difference', self.data[self.trial].gaze.shape[0]-self.i
-        print 'TCFO.postTrial >> Trial Duration',(Settings.psychopyClock.getTime()-self.t0)
+        self.startTracking()
+        if driftCorrection: self.doDriftCorrection()
     
-    def closeConnection(self):
-        if self.trial != len(self.data)-1:
-            print 'TCFO.closeConnection >> nr of trials does not correspond'
-
-    def getGazePosition(self,index,eyes=1,units='deg'):
-        ''' returns the gaze postion of the data specified by index
-            if coordinates are not available or invalid, returns nan values
-            index - self.gazeData index, e.g. -1 returns the last sample
-            eyes - 1: average coordinates of both eye are return as ndarray with 2 elements
-                    2: coordinates of both eyes are returned as ndarray with 4 elements
-            units - units of output coordinates
-                    'deg' are currently supported
-        '''
-        if units is 'deg':
-            xscale=1; yscale=1
-        else: raise ValueError( 'Wrong or unsupported units argument in getGazePosition')
-        if index==0: return np.ones( eyes*2)*np.nan
-        out= self.data[self.trial].gaze[index,[1,2,4,5]]
-        if eyes==2: return np.array(out)
-        avg=[(out[0]+out[2])/2.0, (out[1]+out[3])/2.0]
-        #if np.isnan(out[0]): avg[0]=out[2];avg[1]=out[3];
-        #if np.isnan(out[2]): avg[0]=out[0];avg[1]=out[1];
-        if np.isnan(out[2]) or np.isnan(out[0]): avg=[np.nan,np.nan]
-        return np.array(avg)
-        
-    def getCurrentGazePosition(self,eyes=1,units='norm'):
-        ''' returns the current gaze postion
-            if coordinates are not available or invalid, returns nan values
-            eyes - 1: average coordinates of both eye are return as ndarray with 2 elements
-                    2: coordinates of both eyes are returned as ndarray with 4 elements
-            units - units of output coordinates
-                    'norm', 'pix', 'cm' and 'deg' are currently supported
-        '''
-        return self.gaze[self.i,:]
-            
-        
-    def getCurrentFixation(self, units='deg'):
-        ''' returns the triple gc,fc,fix
-            where gc is currect gaze position, fc is current fixation position (or nans if not available)
-            and fix indicates whether a fixation is currently taking place
-            units - units of output coordinates
-                    'norm', 'pix', 'cm' and 'deg' are currently supported
-        '''
-        event.clearEvents()
-        noPress= not self.playMode
-        t0=Settings.psychopyClock.getTime()  
-        incf=1
-        while noPress and Settings.psychopyClock.getTime()-t0<0.015 : 
-            for key in event.getKeys():
-                if 'o' == key: noPress=False; incf=1
-                if 'i' == key: noPress=False; incf=-1
-                if 'p' == key: noPress=False; incf=10
-                if 'u' == key: noPress=False; incf=-10
-                if 'x' == key: noPress=False; incf=100
-            time.sleep(0.01)
-        self.i+=incf;
-        if self.i<self.gaze.shape[0] and not (self.times[self.i]==self.times[self.i+2]):
-            gc=self.gaze[self.i,:]
-            fd=self.fixations[self.i,2]
-            fc=self.fixations[self.i,[0,1]]
-            tm=self.times[self.i]
-        else: 
-            gc=np.ones(2)*np.nan
-            fd=0
-            fc=np.ones(2)*np.nan
-            tm=-1.0
-        
-        if fd>Settings.FIXMINDUR:
-            #print 'check ',fc, fd
-            self.circle.setPos(fc)
-            if fd<3: self.circle.setRadius(fd+0.2)
-            self.circle.draw()
-        if self.i+1<len(self.msgs) and self.playMode:
-            if self.msgs[self.i+1] == 'Reward On': self.circle.setFillColor('green')
-            elif self.msgs[self.i+1] == 'Reward Off': self.circle.setFillColor('red')
-        
-        if not np.isnan(gc[0]): #and not self.playMode:
-            self.circle2.setPos(gc)
-            self.circle2.draw()
-        if not self.playMode:
-            #print self.times[self.i], gc, self.times[self.i+2]
-            self.msg1.setText('Time: %.3f %.3f, Iteration %d'%(tm,self.check[self.i],self.i))
-            self.msg1.draw()
-        #if len(self.msgs[self.i+1])>0:
-            #print self.msgs[self.i+1]
-            self.msg2.setText(self.msgs[self.i+1])
-            if len(self.msgs[self.i+1])>0: print 'MSG ',self.msgs[self.i+1]
-            self.msg2.draw()
-        #print gc,fd
-        return gc,fc, fd>Settings.FIXMINDUR,incf-1
-
 if __name__ == "__main__":
     # following demo shows the performance of the online fixation detection algorithm
     import sys
